@@ -1,1 +1,1 @@
-# Cram-r-Lundberg-Model
+# Cramér-Lundberg-Model
