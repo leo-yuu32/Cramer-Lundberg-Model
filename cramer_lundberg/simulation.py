@@ -1,6 +1,5 @@
 """
-Core Cramér-Lundberg surplus process simulation engine.
-Vectorised, lean (<150 lines). No Streamlit.
+Core Cramér-Lundberg model simulation engine.
 """
 
 import numpy as np
@@ -8,7 +7,7 @@ from utils import get_distribution
 
 
 class CramerLundbergModel:
-    """Classical Cramér-Lundberg surplus process U(t) = u + ct - sum(X_i)."""
+    """Cramér-Lundberg surplus process X(t) = u + rt - sum(B_i)."""
 
     def __init__(self, u, c, lambda_, claim_dist, claim_params):
         self.u = float(u)
@@ -37,7 +36,6 @@ class CramerLundbergModel:
         min_surplus = np.full(n_paths, np.inf)
 
         for i in range(n_paths):
-            # Inter-arrival times Exp(λ) until cumulative time > T
             t_cum = 0.0
             arrivals = []
             while t_cum < T:
@@ -54,7 +52,6 @@ class CramerLundbergModel:
             else:
                 claim_sizes = self.claim_dist.rvs(size=n_claims, random_state=rng)
                 cum_claims = np.cumsum(claim_sizes)
-                # U(t_k) = u + c*t_k - cumsum(X)[k]; ruin only at claim times
                 surplus_at_claims = (
                     self.u + self.c * arrivals - cum_claims
                 )

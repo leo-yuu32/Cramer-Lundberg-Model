@@ -1,5 +1,5 @@
 """
-Monte Carlo estimation, confidence intervals, and bootstrap for ruin probability.
+Monte Carlo estimation, confidence intervals, and bootstrap.
 """
 
 import numpy as np
@@ -8,7 +8,8 @@ import numpy as np
 def estimate_ruin_probability(ruin_occurred):
     """
     Point estimate and 95% CIs (Wald and Wilson) for ruin probability.
-    Wilson: p̃ = (n p̂ + z²/2)/(n + z²), ñ = n + z², CI = p̃ ± z sqrt(p̃(1-p̃)/ñ).
+    Wilson: p̃ = (n p̂ + z²/2)/(n + z²), ñ = n + z²,
+    CI = p̃ ± z sqrt(p̃(1-p̃)/ñ).
     """
     ruin_occurred = np.asarray(ruin_occurred, dtype=bool)
     n = int(ruin_occurred.size)
@@ -33,7 +34,7 @@ def estimate_ruin_probability(ruin_occurred):
 
 
 def estimate_ruin_time_stats(tau_values, ruin_occurred):
-    """Mean, median, std, and CLT-based CI for ruin time τ (conditional on ruin)."""
+    """Mean, median, std, and CLT-based CI for ruin time τ (cond. on ruin)."""
     tau_values = np.asarray(tau_values)
     ruin_occurred = np.asarray(ruin_occurred, dtype=bool)
     tau_cond = tau_values[ruin_occurred]
@@ -117,3 +118,38 @@ def bootstrap_ci(data, stat_fn, n_bootstrap=2000, alpha=0.05):
     lower = np.percentile(boot_stats, 100 * alpha / 2)
     upper = np.percentile(boot_stats, 100 * (1 - alpha / 2))
     return (float(lower), float(upper))
+
+
+def analyze_ruin_decay(
+    u_range, c, lambda_, claim_dist, claim_params, n_paths, T, seed_base=42
+):
+    """
+    Analyze empirical ruin probability decay across initial surplus values.
+
+    Args:
+        u_range: Array-like of initial surplus values to test
+        c: Premium rate
+        lambda_: Claim intensity
+        claim_dist: Claim distribution name
+        claim_params: Claim distribution parameters dict
+        n_paths: Number of paths per u value
+        T: Time horizon
+        seed_base: Base seed (each u gets seed_base + u_index)
+
+    Returns:
+        tuple: (u_values, psi_values) as numpy arrays
+    """
+    from simulation import CramerLundbergModel
+
+    u_values = np.asarray(u_range)
+    psi_values = []
+
+    for i, u_val in enumerate(u_values):
+        model = CramerLundbergModel(
+            u_val, c, lambda_, claim_dist, claim_params
+        )
+        results = model.simulate_paths(n_paths, T, seed=seed_base + i)
+        psi_hat = float(np.mean(results["ruin_occurred"]))
+        psi_values.append(psi_hat)
+
+    return u_values, np.array(psi_values)

@@ -2,29 +2,280 @@
 All visualisations using Plotly only. Consistent colour palette.
 """
 
+import os
 import numpy as np
 import plotly.graph_objects as go
-from scipy import stats
 
-# Colour palette
-COLOR_SURVIVING = "rgba(99, 110, 250, 0.15)"
-COLOR_RUINED = "rgba(239, 85, 59, 0.25)"
-COLOR_BOUND = "#00CC96"
-COLOR_EXACT = "#AB63FA"
-COLOR_CI_BAND = "rgba(99, 110, 250, 0.2)"
-COLOR_RUIN_LINE = "darkgrey"
+# Modern colour palette
+COLOR_SURVIVING = "rgba(59, 130, 246, 0.15)"    # Soft blue
+COLOR_SURVIVING_LINE = "rgba(59, 130, 246, 0.3)" # Blue for path lines
+COLOR_RUINED = "rgba(239, 68, 68, 0.2)"          # Soft red
+COLOR_RUINED_LINE = "rgba(239, 68, 68, 0.4)"     # Red for ruined path lines
+COLOR_CI_BAND = "rgba(59, 130, 246, 0.15)"        # Light blue fill
+COLOR_CI_LINE = "rgba(59, 130, 246, 0.6)"         # Blue CI border
+COLOR_RUIN_LINE = "#94a3b8"                        # Slate grey for U=0
+COLOR_ESTIMATE = "#2563eb"                         # Blue for point estimates
+COLOR_ACCENT = "#8b5cf6"                           # Purple accent
 
 
-def _default_layout(fig, title=None, x_title=None, y_title=None, height=420):
+def _default_layout(fig, title=None, x_title=None, y_title=None, height=450):
     fig.update_layout(
         template="plotly_white",
         height=height,
-        margin=dict(l=60, r=40, t=50, b=50),
-        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
-        title=dict(text=title, x=0.5, xanchor="center") if title else None,
-        xaxis_title=x_title,
-        yaxis_title=y_title,
+        title=dict(text=title, font=dict(size=16, color="#1e293b")) if title else None,
+        xaxis=dict(
+            title=x_title,
+            gridcolor="#f1f5f9",
+            zeroline=True,
+            zerolinecolor="#e2e8f0"
+        ),
+        yaxis=dict(
+            title=y_title,
+            gridcolor="#f1f5f9",
+            zeroline=True,
+            zerolinecolor="#e2e8f0"
+        ),
+        font=dict(family="Inter, system-ui, sans-serif", size=12, color="#334155"),
+        margin=dict(l=60, r=30, t=50, b=60),
+        hoverlabel=dict(bgcolor="white", font_size=12),
     )
+    return fig
+
+
+def _interpolate_path(t_path, U_path, t_query):
+    """Interpolate surplus U(t_query) for a path given its claim times and surpluses."""
+    t_path = np.asarray(t_path)
+    U_path = np.asarray(U_path)
+    t_query = np.asarray(t_query)
+    
+    # For each query time, find which interval it falls in
+    U_query = np.zeros_like(t_query)
+    for i, t_q in enumerate(t_query):
+        # Find the rightmost time <= t_q
+        idx = np.searchsorted(t_path, t_q, side='right') - 1
+        idx = max(0, min(idx, len(t_path) - 2))
+        
+        # Linear interpolation: U(t) = U(t_k) + (U(t_{k+1}) - U(t_k)) * (t - t_k) / (t_{k+1} - t_k)
+        t_k = t_path[idx]
+        t_kp1 = t_path[idx + 1]
+        U_k = U_path[idx]
+        U_kp1 = U_path[idx + 1]
+        
+        if t_kp1 > t_k:
+            U_query[i] = U_k + (U_kp1 - U_k) * (t_q - t_k) / (t_kp1 - t_k)
+        else:
+            U_query[i] = U_k
+    
+    return U_query
+
+
+def build_animated_paths(sim_results, n_display=50, n_frames=60, T=100, speed=5, u=0):
+    """
+    Build a Plotly figure with animation frames that progressively draw surplus paths.
+    
+    Args:
+        sim_results: dict from CramerLundbergModel.simulate_paths()
+        n_display: number of paths to show
+        n_frames: number of animation frames (more = smoother but slower)
+        T: time horizon
+        speed: animation speed (1-10), controls frame duration
+        u: initial surplus (for annotation)
+    
+    Returns:
+        go.Figure with animation frames
+    """
+    t_list = sim_results["t"]
+    U_t_list = sim_results["U_t"]
+    ruin_occurred = sim_results["ruin_occurred"]
+    tau = sim_results["tau"]
+    
+    n_show = min(n_display, len(t_list))
+    
+    # Calculate global Y-axis range from ALL paths (not just displayed)
+    all_surpluses = np.concatenate(U_t_list)
+    global_min = float(np.min(all_surpluses))
+    global_max = float(np.max(all_surpluses))
+    # Add 10% margin on each side
+    margin = (global_max - global_min) * 0.1
+    y_min = global_min - margin
+    y_max = global_max + margin
+    # Ensure initial surplus u is visible
+    y_min = min(y_min, u - margin)
+    y_max = max(y_max, u + margin)
+    
+    # Uniform time grid for frames
+    frame_times = np.linspace(0, T, n_frames)
+    
+    # Frame duration based on speed: speed 1 = 200ms, speed 5 = 80ms, speed 10 = 20ms
+    frame_duration = int(200 / speed)
+    
+    # Build frames
+    frames = []
+    for k in range(n_frames):
+        t_max = frame_times[k]
+        
+        # For each path, get points up to t_max
+        frame_data = []
+        n_ruined_by_frame = 0
+        
+        for i in range(n_show):
+            t_path = np.asarray(t_list[i])
+            U_path = np.asarray(U_t_list[i])
+            is_ruined = ruin_occurred[i]
+            ruin_time = tau[i] if is_ruined else np.inf
+            
+            # Count if ruined by this frame time
+            if is_ruined and ruin_time <= t_max:
+                n_ruined_by_frame += 1
+            
+            # Only show path up to min(t_max, ruin_time)
+            t_display = min(t_max, ruin_time) if is_ruined else t_max
+            
+            # Get points on uniform grid up to t_display
+            t_query = frame_times[frame_times <= t_display]
+            if len(t_query) == 0:
+                t_query = np.array([0.0])
+            
+            U_query = _interpolate_path(t_path, U_path, t_query)
+            
+            # Color by ruin status (if ruined and shown past ruin time)
+            if is_ruined and t_max >= ruin_time:
+                color = COLOR_RUINED_LINE
+            else:
+                color = COLOR_SURVIVING_LINE
+            
+            frame_data.append(
+                go.Scatter(
+                    x=t_query,
+                    y=U_query,
+                    mode="lines",
+                    line=dict(color=color, width=0.8),
+                    showlegend=False,
+                    name=f"Path {i+1}",
+                )
+            )
+        
+        # Add U=0 line (present in every frame)
+        frame_data.append(
+            go.Scatter(
+                x=[0, T],
+                y=[0, 0],
+                mode="lines",
+                line=dict(color=COLOR_RUIN_LINE, dash="dash", width=1.5),
+                showlegend=False,
+                name="U=0",
+            )
+        )
+        
+        # Add initial surplus marker
+        frame_data.append(
+            go.Scatter(
+                x=[0],
+                y=[u],
+                mode="markers",
+                marker=dict(size=8, color="#2563eb", symbol="circle"),
+                showlegend=False,
+                name="u",
+            )
+        )
+        
+        # Add annotation with time and ruin count
+        frame_layout = go.Layout(
+            annotations=[
+                dict(
+                    text=f"t = {t_max:.1f} | Paths ruined: {n_ruined_by_frame}/{n_show}",
+                    xref="paper", yref="paper",
+                    x=0.02, y=0.98,
+                    showarrow=False,
+                    font=dict(size=13, color="#374151"),
+                    bgcolor="rgba(255,255,255,0.8)",
+                    borderpad=4
+                )
+            ]
+        )
+        
+        frames.append(go.Frame(data=frame_data, layout=frame_layout, name=f"frame_{k}"))
+    
+    # Initial data (first frame)
+    fig = go.Figure(
+        data=frames[0].data,
+        frames=frames,
+    )
+    
+    # Legend placeholders
+    fig.add_trace(
+        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_RUINED_LINE, width=2), name="Ruin")
+    )
+    fig.add_trace(
+        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_SURVIVING_LINE, width=2), name="Surviving")
+    )
+    
+    # Layout with animation controls
+    fig.update_layout(
+        template="plotly_white",
+        height=550,
+        title="Surplus Process U(t)",
+        xaxis_title="Time t",
+        yaxis=dict(
+            title="Surplus U(t)",
+            range=[y_min, y_max],
+            fixedrange=True
+        ),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
+        updatemenus=[dict(
+            type="buttons",
+            showactive=False,
+            y=1.12,
+            x=0.5,
+            xanchor="center",
+            buttons=[
+                dict(label="▶ Play",
+                     method="animate",
+                     args=[None, {
+                         "frame": {"duration": frame_duration, "redraw": True},
+                         "fromcurrent": True,
+                         "transition": {"duration": 0}
+                     }]),
+                dict(label="⏸ Pause",
+                     method="animate",
+                     args=[[None], {
+                         "frame": {"duration": 0, "redraw": False},
+                         "mode": "immediate",
+                         "transition": {"duration": 0}
+                     }])
+            ]
+        )],
+        sliders=[dict(
+            active=0,
+            steps=[dict(
+                method="animate",
+                args=[[f"frame_{k}"], {
+                    "frame": {"duration": 0, "redraw": True},
+                    "mode": "immediate",
+                    "transition": {"duration": 0}
+                }],
+                label=f"t={frame_times[k]:.0f}"
+            ) for k in range(0, n_frames, max(1, n_frames // 20))],
+            x=0.05,
+            len=0.9,
+            xanchor="left",
+            y=-0.05,
+            currentvalue=dict(
+                prefix="Time: ",
+                visible=True,
+                xanchor="center"
+            ),
+            transition=dict(duration=0)
+        )]
+    )
+    
     return fig
 
 
@@ -41,7 +292,7 @@ def plot_sample_paths(sim_results, n_display=50, T=100):
             fig.add_trace(
                 go.Scatter(
                     x=t_list[i], y=U_t_list[i], mode="lines",
-                    line=dict(color=COLOR_RUINED, width=0.8), showlegend=False,
+                    line=dict(color=COLOR_RUINED_LINE, width=0.8), showlegend=False,
                 )
             )
     # Surviving paths (no legend)
@@ -50,15 +301,15 @@ def plot_sample_paths(sim_results, n_display=50, T=100):
             fig.add_trace(
                 go.Scatter(
                     x=t_list[i], y=U_t_list[i], mode="lines",
-                    line=dict(color=COLOR_SURVIVING, width=0.8), showlegend=False,
+                    line=dict(color=COLOR_SURVIVING_LINE, width=0.8), showlegend=False,
                 )
             )
     # Legend placeholders
     fig.add_trace(
-        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_RUINED, width=2), name="Ruin")
+        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_RUINED_LINE, width=2), name="Ruin")
     )
     fig.add_trace(
-        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_SURVIVING, width=2), name="Surviving")
+        go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_SURVIVING_LINE, width=2), name="Surviving")
     )
     # U=0 line
     fig.add_hline(y=0, line_dash="dash", line_color=COLOR_RUIN_LINE)
@@ -68,31 +319,10 @@ def plot_sample_paths(sim_results, n_display=50, T=100):
         xref="paper", yref="paper", x=0.02, y=0.98, showarrow=False,
         font=dict(size=12),
     )
-    return _default_layout(fig, x_title="Time t", y_title="Surplus U(t)")
+    return _default_layout(fig, title="Surplus Process U(t)", x_title="Time t", y_title="Surplus U(t)", height=550)
 
 
-def plot_ruin_probability_vs_surplus(u_values, psi_estimates, ci_lowers, ci_uppers):
-    """Line plot with Monte Carlo estimate and confidence interval band."""
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=u_values, y=psi_estimates, mode="lines+markers", name="ψ̂(u)",
-            line=dict(color="rgb(99, 110, 250)", width=2),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=np.concatenate([u_values, u_values[::-1]]),
-            y=np.concatenate([ci_uppers, ci_lowers[::-1]]),
-            fill="toself", fillcolor=COLOR_CI_BAND, line=dict(color="rgba(255,255,255,0)"),
-            name="95% CI",
-        )
-    )
-    fig.update_yaxes(type="log")
-    return _default_layout(fig, x_title="Initial surplus u", y_title="Ruin probability ψ(u)")
-
-
-def plot_convergence(convergence_data):
+def plot_convergence(convergence_data, true_value=None):
     """Running estimate with CI band showing convergence as sample size increases."""
     fig = go.Figure()
     s = convergence_data["sample_sizes"]
@@ -100,7 +330,7 @@ def plot_convergence(convergence_data):
     cl = convergence_data["ci_lower"]
     cu = convergence_data["ci_upper"]
     fig.add_trace(
-        go.Scatter(x=s, y=e, mode="lines+markers", name="ψ̂(u)", line=dict(color="rgb(99, 110, 250)", width=2))
+        go.Scatter(x=s, y=e, mode="lines+markers", name="ψ̂(u)", line=dict(color=COLOR_ESTIMATE, width=2))
     )
     fig.add_trace(
         go.Scatter(
@@ -108,233 +338,75 @@ def plot_convergence(convergence_data):
             fill="toself", fillcolor=COLOR_CI_BAND, line=dict(color="rgba(255,255,255,0)"), name="95% CI"
         )
     )
-    return _default_layout(fig, x_title="Number of simulations", y_title="ψ̂(u)")
+    if true_value is not None and np.isfinite(true_value):
+        fig.add_hline(y=true_value, line_dash="dash", line_color=COLOR_ACCENT, annotation_text="True ψ(u)")
+    return _default_layout(fig, title="Convergence of Ruin Probability Estimate", x_title="Number of simulations", y_title="ψ̂(u)", height=300)
 
 
-def plot_ruin_time_distribution(tau_values, ruin_occurred):
-    """Histogram of ruin times τ (conditional on ruin) with KDE and mean line."""
-    tau_cond = np.asarray(tau_values)[np.asarray(ruin_occurred)]
-    if tau_cond.size == 0:
-        fig = go.Figure()
-        fig.add_annotation(text="No ruin events.", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
-        return _default_layout(fig, x_title="Ruin time τ", y_title="Count")
-    fig = go.Figure()
-    fig.add_trace(go.Histogram(x=tau_cond, nbinsx=min(40, max(10, tau_cond.size // 5)), name="Ruin times τ"))
-    mean_tau = float(np.mean(tau_cond))
-    fig.add_vline(x=mean_tau, line_dash="dash", line_color=COLOR_BOUND, annotation_text=f"Mean = {mean_tau:.2f}")
-    # KDE
-    try:
-        kde = stats.gaussian_kde(tau_cond)
-        x_kde = np.linspace(tau_cond.min(), tau_cond.max(), 200)
-        scale = tau_cond.size * (tau_cond.max() - tau_cond.min()) / 40
-        fig.add_trace(
-            go.Scatter(
-                x=x_kde, y=kde(x_kde) * scale, mode="lines", name="KDE",
-                line=dict(color=COLOR_EXACT, width=2),
-            )
-        )
-    except Exception:
-        pass
-    return _default_layout(fig, x_title="Ruin time τ", y_title="Count")
+def plot_and_save_decay(u_values, psi_values):
+    """
+    Plot empirical ruin probability decay on semi-log scale and auto-save figure.
 
+    Args:
+        u_values: Array of initial surplus values
+        psi_values: Array of empirical ruin probabilities
 
-def plot_claim_size_distribution(claim_dist, claim_params, n_samples=10000):
-    """Histogram of sampled claims with theoretical PDF overlay."""
-    from utils import get_distribution
-    dist = get_distribution(claim_dist, claim_params)
-    samples = dist.rvs(size=n_samples, random_state=42)
-    fig = go.Figure()
-    fig.add_trace(
-        go.Histogram(
-            x=samples, nbinsx=50, name="Samples", opacity=0.7,
-            histnorm="probability density",
-        )
-    )
-    x_pdf = np.linspace(max(1e-6, samples.min()), np.percentile(samples, 99.5), 300)
-    pdf_vals = dist.pdf(x_pdf)
-    fig.add_trace(
-        go.Scatter(
-            x=x_pdf, y=pdf_vals, mode="lines", name="PDF",
-            line=dict(color=COLOR_BOUND, width=2),
-        )
-    )
-    mu, var = float(dist.mean()), float(dist.var())
-    fig.add_annotation(
-        text=f"μ = {mu:.3f}, σ² = {var:.3f}",
-        xref="paper", yref="paper", x=0.98, y=0.98, showarrow=False, xanchor="right", yanchor="top",
-    )
-    return _default_layout(fig, x_title="Claim size", y_title="Density")
-
-
-def plot_sensitivity_heatmap(theta_values, u_values, psi_matrix, ci_matrix=None):
-    """Heatmap: x=θ, y=u, colour=ψ̂. Optional CI matrix for annotations."""
-    fig = go.Figure(
-        data=go.Heatmap(
-            x=theta_values, y=u_values, z=psi_matrix,
-            colorscale="Blues", colorbar=dict(title="ψ̂(u)"),
-        )
-    )
-    if psi_matrix.size <= 20 * 20 and ci_matrix is None:
-        # Annotate cells if grid small
-        fig.update_traces(text=np.round(psi_matrix, 3), texttemplate="%{text}", textfont={"size": 10})
-    return _default_layout(fig, x_title="θ (safety loading)", y_title="Initial surplus u", height=450)
-
-
-def plot_ci_comparison(wald_ci, wilson_ci, psi_hat):
-    """Visualise Wald vs Wilson CIs (horizontal intervals)."""
-    fig = go.Figure()
-    y_wald, y_wilson = 1, 0
-    fig.add_trace(
-        go.Scatter(
-            x=[wald_ci[0], wald_ci[1]], y=[y_wald, y_wald], mode="lines+markers+text",
-            line=dict(color="rgb(99, 110, 250)", width=4), name="Wald CI",
-            text=["", ""], textposition="top center",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[wilson_ci[0], wilson_ci[1]], y=[y_wilson, y_wilson], mode="lines+markers+text",
-            line=dict(color=COLOR_BOUND, width=4), name="Wilson CI",
-            text=["", ""], textposition="bottom center",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(x=[psi_hat], y=[0.5], mode="markers", marker=dict(size=14, color=COLOR_EXACT, symbol="diamond"),
-                   name="ψ̂")
-    )
-    fig.update_yaxes(tickvals=[0, 1], ticktext=["Wilson", "Wald"], range=[-0.2, 1.2])
-    return _default_layout(fig, x_title="Probability", height=280)
-
-
-def plot_min_surplus_search(u_values, psi_estimates, ci_lowers, ci_uppers, threshold=0.005):
-    """Plot ψ̂(u) with 99.5% Wilson CI band and a horizontal threshold line.
-    Annotates the minimum u where the upper CI bound drops below threshold."""
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=u_values, y=psi_estimates, mode="lines+markers", name="ψ̂(u)",
-            line=dict(color="rgb(99, 110, 250)", width=2),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=u_values, y=ci_uppers, mode="lines", name="Upper 99.5% CI",
-            line=dict(color=COLOR_BOUND, width=2, dash="dash"),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=u_values, y=ci_lowers, mode="lines", name="Lower 99.5% CI",
-            line=dict(color=COLOR_EXACT, width=2, dash="dash"),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=np.concatenate([u_values, u_values[::-1]]),
-            y=np.concatenate([ci_uppers, ci_lowers[::-1]]),
-            fill="toself", fillcolor=COLOR_CI_BAND,
-            line=dict(color="rgba(255,255,255,0)"),
-            name="99.5% CI band", showlegend=False,
-        )
-    )
-    fig.add_hline(
-        y=threshold, line_dash="dot", line_color="red", line_width=2,
-        annotation_text=f"Threshold = {threshold}",
-        annotation_position="top right",
-        annotation_font_color="red",
-    )
-    # Find minimum u where upper CI ≤ threshold
-    below = np.where(np.array(ci_uppers) <= threshold)[0]
-    if len(below) > 0:
-        min_idx = below[0]
-        min_u = u_values[min_idx]
-        fig.add_vline(
-            x=min_u, line_dash="dash", line_color="green", line_width=2,
-            annotation_text=f"min u = {min_u:.1f}",
-            annotation_position="top left",
-            annotation_font_color="green",
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=[min_u], y=[ci_uppers[min_idx]], mode="markers",
-                marker=dict(size=12, color="green", symbol="star"),
-                name=f"min u = {min_u:.1f}",
-            )
-        )
-    return _default_layout(
-        fig, title="Minimum Surplus for ψ(u) < 0.005 (99.5% CI)",
-        x_title="Initial surplus u", y_title="Ruin probability ψ(u)",
-    )
-
-
-def plot_min_surplus_zoomed(u_values, psi_estimates, ci_lowers, ci_uppers, threshold=0.005):
-    """Zoomed view around the intersection where the upper CI crosses the threshold."""
+    Returns:
+        go.Figure with log-scale Y-axis
+    """
     u_values = np.asarray(u_values)
-    ci_uppers = np.asarray(ci_uppers)
-    ci_lowers = np.asarray(ci_lowers)
-    psi_estimates = np.asarray(psi_estimates)
+    psi_values = np.asarray(psi_values)
 
-    below = np.where(ci_uppers <= threshold)[0]
-    if len(below) == 0:
-        # No crossing found — fall back to full plot
-        return plot_min_surplus_search(u_values, psi_estimates, ci_lowers, ci_uppers, threshold)
-
-    cross_idx = below[0]
-    # Window: a few points either side of the crossing
-    pad = max(3, len(u_values) // 8)
-    lo = max(0, cross_idx - pad)
-    hi = min(len(u_values), cross_idx + pad + 1)
-    sl = slice(lo, hi)
+    # Filter out zero probabilities to avoid log(0) issues
+    # Use floor of 1e-5 for zero values to allow log plotting
+    psi_plot = np.where(psi_values > 0, psi_values, 1e-5)
 
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=u_values[sl], y=psi_estimates[sl], mode="lines+markers", name="ψ̂(u)",
-            line=dict(color="rgb(99, 110, 250)", width=2),
+            x=u_values,
+            y=psi_plot,
+            mode="lines+markers",
+            name="Empirical ψ̂(u)",
+            line=dict(color=COLOR_ESTIMATE, width=2),
+            marker=dict(size=6, color=COLOR_ESTIMATE),
         )
     )
-    fig.add_trace(
-        go.Scatter(
-            x=u_values[sl], y=ci_uppers[sl], mode="lines+markers", name="Upper 99.5% CI",
-            line=dict(color=COLOR_BOUND, width=2, dash="dash"),
-        )
+
+    fig.update_yaxes(type="log")
+
+    # Set Y-axis range to avoid log(0) - start slightly above minimum non-zero value
+    non_zero_psi = psi_values[psi_values > 0]
+    if len(non_zero_psi) > 0:
+        y_min = max(1e-5, np.min(non_zero_psi) * 0.5)
+        y_max = np.max(psi_values) * 1.5 if np.max(psi_values) > 0 else 1.0
+        fig.update_yaxes(range=[y_min, y_max])
+    else:
+        # Edge case: no ruin at any u - set a default range
+        fig.update_yaxes(range=[1e-5, 1.0])
+
+    fig = _default_layout(
+        fig,
+        title="Empirical Ruin Probability Decay (Semi-Log Scale)",
+        x_title="Initial Surplus u",
+        y_title="P(Ruin) - Log Scale",
+        height=450
     )
-    fig.add_trace(
-        go.Scatter(
-            x=u_values[sl], y=ci_lowers[sl], mode="lines+markers", name="Lower 99.5% CI",
-            line=dict(color=COLOR_EXACT, width=2, dash="dash"),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=np.concatenate([u_values[sl], u_values[sl][::-1]]),
-            y=np.concatenate([ci_uppers[sl], ci_lowers[sl][::-1]]),
-            fill="toself", fillcolor=COLOR_CI_BAND,
-            line=dict(color="rgba(255,255,255,0)"),
-            showlegend=False,
-        )
-    )
-    fig.add_hline(
-        y=threshold, line_dash="dot", line_color="red", line_width=2,
-        annotation_text=f"Threshold = {threshold}",
-        annotation_position="top right",
-        annotation_font_color="red",
-    )
-    min_u = u_values[cross_idx]
-    fig.add_vline(
-        x=min_u, line_dash="dash", line_color="green", line_width=2,
-        annotation_text=f"min u = {min_u:.1f}",
-        annotation_position="top left",
-        annotation_font_color="green",
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[min_u], y=[ci_uppers[cross_idx]], mode="markers",
-            marker=dict(size=14, color="green", symbol="star"),
-            name=f"min u = {min_u:.1f}",
-        )
-    )
-    return _default_layout(
-        fig, title="Zoomed: Upper CI crossing 0.005 threshold",
-        x_title="Initial surplus u", y_title="Ruin probability ψ(u)",
-    )
+
+    # Auto-save logic: create figures/ directory if needed and save
+    figures_dir = "figures"
+    if not os.path.exists(figures_dir):
+        os.makedirs(figures_dir, exist_ok=True)
+
+    save_path = os.path.join(figures_dir, "ruin_decay_analysis.png")
+    try:
+        fig.write_image(save_path, scale=2)
+        # Store save status in figure's customdata for UI to check
+        fig._saved_successfully = True
+    except Exception as e:
+        # If kaleido is not installed, skip saving but don't fail
+        # Note: Install kaleido with: pip install kaleido
+        fig._saved_successfully = False
+        fig._save_error = str(e)
+
+    return fig
