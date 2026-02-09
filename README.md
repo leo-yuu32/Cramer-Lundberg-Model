@@ -1,6 +1,6 @@
 # Cramér-Lundberg Ruin Simulator
 
-Interactive Streamlit app for simulating the classical Cramér-Lundberg insurance surplus process and estimating ruin probabilities via Monte Carlo. Suitable for undergraduate research (e.g. Imperial College London).
+Interactive Streamlit app for simulating the classical Cramér-Lundberg insurance surplus process and estimating ruin probabilities via Monte Carlo. Suitable for undergraduate research (e.g. Imperial College London). View simulator here: https://cramer-lundberg-simulation.streamlit.app/
 
 ## Surplus process
 
